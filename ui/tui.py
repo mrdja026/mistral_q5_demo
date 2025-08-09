@@ -60,6 +60,7 @@ class GameTUI(App):
         (":", "focus_input", "Cmd"),
         ("ctrl+i", "focus_input", "Focus input"),
         ("escape", "focus_input", "Focus input"),
+        ("ctrl+c", "copy_to_clipboard", "Copy to clipboard"),
     ]
 
     last_tile: reactive[Optional[dict]] = reactive(None)
@@ -75,6 +76,8 @@ class GameTUI(App):
         # LLM settings
         self.llm_enabled: bool = True
         self.llm_model: str = os.getenv("OLLAMA_MODEL", "dnd-writer")
+        # Keep a lightweight chat history for free-form messages
+        self.chat_history: List[dict] = []
 
     def _register_commands(self) -> None:
         self.router.register(CommandSpec("start", "Start a new session", self._cmd_start, "Ctrl+N"))
@@ -298,6 +301,87 @@ class GameTUI(App):
             except Exception:
                 pass
 
+    # ---------- Free-form chat (LLM) ----------
+
+    def _chat_from_text_async(self, user_text: str) -> None:
+        threading.Thread(target=self._chat_from_text, args=(user_text,), daemon=True).start()
+
+    def _chat_from_text(self, user_text: str) -> None:
+        if not self.llm_enabled:
+            try:
+                self.call_from_thread(self._info, "LLM is OFF — enable with :llm on")
+            except Exception:
+                pass
+            return
+        try:
+            import ollama  # type: ignore
+        except Exception as e:
+            try:
+                self.call_from_thread(self._error, f"LLM disabled — install ollama or set OLLAMA_MODEL. {e}")
+            except Exception:
+                pass
+            return
+
+        # Build conversation with optional grounding from last_tile
+        history = list(self.chat_history)
+        history.append({"role": "user", "content": user_text})
+
+        grounding = ""
+        max_words = 500
+        if self.last_tile:
+            exits = ", ".join(self.last_tile.get("exits", []))
+            facts = "; ".join(self.last_tile.get("salient_facts", [])[:3])
+            grounding = (
+                "Narrate vividly but stay consistent with tool facts. Current tile exits: "
+                + exits
+                + ". Salient facts: "
+                + facts
+                + "."
+            )
+            if isinstance(self.last_tile.get("max_narrative_words"), int):
+                try:
+                    max_words = int(self.last_tile.get("max_narrative_words") or 500)
+                except Exception:
+                    max_words = 500
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are a fantasy creative writer DM. Keep responses under {max_words} words and ground answers in provided tool facts when available."
+                ),
+            }
+        ]
+        if grounding:
+            messages.append({"role": "system", "content": grounding})
+        messages.extend(history)
+
+        predict_tokens = int(max(256, min(2048, int(max_words * 1.6))))
+
+        start = time.time()
+        try:
+            client = ollama.Client()  # type: ignore[name-defined]
+            resp = client.chat(
+                model=self.llm_model,
+                messages=messages,
+                options={"num_predict": predict_tokens, "temperature": 0.8},
+            )
+            text = resp.get("message", {}).get("content", "")
+            elapsed = int((time.time() - start) * 1000)
+            try:
+                self.call_from_thread(self._info, f"Narrative generated in {elapsed} ms")
+                self.call_from_thread(self._print_narrative, text)
+            except Exception:
+                pass
+            # Persist chat history
+            self.chat_history = history
+            self.chat_history.append({"role": "assistant", "content": text})
+        except Exception as e:
+            try:
+                self.call_from_thread(self._error, f"LLM error: {e}")
+            except Exception:
+                pass
+
     def _render_actions(self) -> None:
         lines: List[str] = ["[b]Actions[/]"]
         for spec in self.router.list_specs():
@@ -354,8 +438,8 @@ class GameTUI(App):
         try:
             handled = self.router.dispatch(text)
             if not handled:
-                # Free-form chat: for now echo with hint; narrative generation lives in loop.py
-                self._info("Chat mode not yet integrated here. Use :move, :look, :spawn.")
+                # Free-form chat: generate narrative via LLM and render in center transcript
+                self._chat_from_text_async(text)
         except Exception as e:
             self._error(str(e))
 
@@ -364,6 +448,7 @@ class GameTUI(App):
     def _cmd_start(self, _: str) -> None:
         payload = self.client.start()
         self.last_tile = payload
+        self.chat_history = []
         self._info(f"Session started: {payload['session_id']}")
         self._print_tile(payload)
         if self.raw_enabled:
@@ -381,6 +466,7 @@ class GameTUI(App):
         if self.raw_enabled:
             self._json_block("Raw payload", res)
         self.last_tile = None
+        self.chat_history = []
         self._render_context()
 
     def _cmd_reset(self, _: str) -> None:
@@ -388,6 +474,7 @@ class GameTUI(App):
         self._info("Reset all sessions")
         # no payload returned worth printing here
         self.last_tile = None
+        self.chat_history = []
         self._render_context()
 
     def _cmd_move(self, arg: str) -> None:
@@ -426,7 +513,17 @@ class GameTUI(App):
         self._info(f"Spawned {npc['name']} (id={npc['id']}, kind={npc['kind']}, AC={npc['armor_class']})")
         if self.raw_enabled:
             self._json_block("Raw payload", res)
-        self._render_context()
+        # Refresh tile so context/transcript include new NPC and narrate about it
+        try:
+            payload = self.client.look()
+            self.last_tile = payload
+            self._print_tile(payload)
+            self._render_context()
+            if self.llm_enabled:
+                self._narrate_from_tile_async(payload, res.get("event_id"))
+        except Exception:
+            # If look fails, still update context pane
+            self._render_context()
 
     def _cmd_npc(self, arg: str) -> None:
         npc_id = arg.strip()
