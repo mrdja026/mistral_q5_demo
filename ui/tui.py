@@ -214,6 +214,16 @@ class GameTUI(App):
             self.transcript.write(f"  {line}")
         self.transcript.write("")
 
+    def _print_streaming(self, title: str = "DM", hint: str = "Generating…") -> None:
+        # Show a lightweight streaming indicator in the center transcript
+        try:
+            self.transcript.write("")
+            self.transcript.write(f"[b]{title}[/]")
+            self.transcript.write(f"[dim]⏳ {hint}[/]")
+            self.transcript.write("")
+        except Exception:
+            pass
+
     def _print_narrative(self, text: str) -> None:
         # human-readable DM narrative in center panel
         self.transcript.write("")  # ensure separation from prior tool output
@@ -239,6 +249,12 @@ class GameTUI(App):
             except Exception:
                 pass
             return
+
+        # Let the user know something is happening in the center pane
+        try:
+            self.call_from_thread(self._print_streaming, "DM", "Generating narrative…")
+        except Exception:
+            pass
 
         # Build a concise grounding prompt
         tile = payload.get("tile", {})
@@ -326,6 +342,12 @@ class GameTUI(App):
             except Exception:
                 pass
             return
+
+        # Show a streaming indicator while we wait for the model
+        try:
+            self.call_from_thread(self._print_streaming, "DM", "Thinking…")
+        except Exception:
+            pass
 
         # Build conversation with optional grounding from last_tile
         history = list(self.chat_history)
