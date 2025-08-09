@@ -26,6 +26,11 @@ from importlib import import_module
 from typing import Optional, List
 
 
+SYSTEM_PERSONA = (
+    "You are a creative and helpful Dungeons & Dragons narrator and game master. "
+    "You have access to a set of tools. Use humor where appropriate. It is important that you include maps and NPC details in your responses."
+)
+
 def _narrate_from_tile(client, tile_payload: dict, event_id: Optional[int] = None) -> None:
     max_words = int(tile_payload.get("max_narrative_words", 500) or 500)
     pos = tile_payload.get("position", {})
@@ -59,9 +64,12 @@ def _narrate_from_tile(client, tile_payload: dict, event_id: Optional[int] = Non
         {
             "role": "system",
             "content": (
-                f"You are a Dungeon Master. In up to {max_words} words, vividly describe what the player perceives at position {pos}. "
-                "The narrative MUST include all Points of Interest listed by the user as explicit details (weave them naturally but do not omit). "
-                "Do not invent exits, items, entities, or hazards beyond what is provided."
+                f"{SYSTEM_PERSONA} Keep responses under {max_words} words. "
+                f"Describe what the player perceives at position {pos}. "
+                "If an enemy is present, describe them in detail."
+                "if an enemy is present use :spawn [name] [kind] to spawn them"
+                "Include all Points of Interest listed. Do not invent exits, items, "
+                "entities, or hazards beyond what is provided."
             ),
         },
         {
@@ -75,7 +83,7 @@ def _narrate_from_tile(client, tile_payload: dict, event_id: Optional[int] = Non
 
     predict_tokens = int(max(256, min(3072, max_words * 2)))
     resp = client.chat(
-        model="dnd-writer",
+        model="dnd-writer-moe:latest",
         messages=messages,
         options={
             "num_predict": predict_tokens,
@@ -186,7 +194,7 @@ def main(argv: list[str] | None = None):
 
     # Ensure model is ready
     try:
-        client.create("dnd-writer")
+        client.create("dnd-writer-moe:latest")
     except:
         pass
 
@@ -562,11 +570,17 @@ def main(argv: list[str] | None = None):
                 + "; ".join(last_tile.get("salient_facts", [])[:3])
                 + "."
             )
-        max_words = 500
+        max_words = 300
         if last_tile and isinstance(last_tile.get("max_narrative_words"), int):
             max_words = int(last_tile["max_narrative_words"]) or 500
-        messages = [{"role":"system",
-                     "content":f"You are a fantasy creative writer DM. Keep responses under {max_words} words and ground answers in provided tool facts when available."}]
+        messages = [{
+            "role": "system",
+            "content": (
+                f"{SYSTEM_PERSONA} Keep responses under {max_words} words. "
+                "Ground answers in provided tool facts when available. "
+                "Do not invent exits, items, entities, or hazards beyond provided facts."
+            ),
+        }]
         if grounding:
             messages.append({"role":"system", "content": grounding})
         messages.extend(history)
@@ -574,7 +588,7 @@ def main(argv: list[str] | None = None):
         # Allow longer completions by raising token limit
         predict_tokens = int((max_words if 'max_words' in locals() else 500) * 1.6)
         response = client.chat(
-            model="dnd-writer",
+            model="dnd-writer-moe:latest",
             messages=messages,
             options={
                 "num_predict": max(256, min(2048, predict_tokens)),
