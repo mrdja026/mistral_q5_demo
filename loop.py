@@ -19,7 +19,7 @@ from tools.llm_tools_server import (
 )
 
 import json
-from typing import Optional
+from typing import Optional, List
 
 
 def _narrate_from_tile(client: Client, tile_payload: dict, event_id: Optional[int] = None) -> None:
@@ -95,7 +95,52 @@ def _fmt_tile(tile_payload: dict) -> str:
     pos = tile_payload.get("position", {})
     exits = ", ".join(tile_payload.get("exits", []))
     facts = "; ".join(tile_payload.get("salient_facts", [])[:3])
-    return f"📍 Pos {pos} | ➜ Exits: {exits}\n📝 {facts}"
+    heading = tile_payload.get("heading", "?")
+    header = f"🏰 D&D Journey | {pos} facing {heading}"
+    status = f"📍 Pos {pos} | ➜ Exits: {exits}"
+    facts_ln = f"📝 {facts}" if facts else "📝"
+    return f"{header}\n{status}\n{facts_ln}"
+
+
+def _list_suggestions(tile_payload: Optional[dict]) -> List[str]:
+    if not tile_payload:
+        return [":start", ":look", ":move north", "!roll d20", ":help"]
+    exits = tile_payload.get("exits", [])
+    tile = tile_payload.get("tile", {})
+    items = [i.get("kind") for i in tile.get("items", [])]
+    sugg: List[str] = []
+    # movement
+    for d in exits[:3]:
+        sugg.append(f":move {d}")
+    # quick look
+    sugg.append(":look")
+    # items
+    if items:
+        sugg.append(f":take {items[0]}")
+    # dice
+    sugg.append("!roll d20")
+    # encourage spawn usage explicitly via colon syntax
+    sugg.append(":spawn [name] goblin")
+    return sugg[:6]
+
+
+def _parse_legacy_call_args(text: str) -> List[str]:
+    """Parse simple function-style arguments like "('Gruk','goblin')" into ["Gruk","goblin"].
+
+    This is a forgiving parser for our legacy inputs; it does not handle nested
+    or escaped quotes and is intentionally simple for CLI ergonomics.
+    """
+    if "(" not in text or ")" not in text:
+        return []
+    inner = text[text.find("(") + 1 : text.rfind(")")]
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    cleaned: List[str] = []
+    for p in parts:
+        if (p.startswith("\"") and p.endswith("\"")) or (p.startswith("'") and p.endswith("'")):
+            cleaned.append(p[1:-1])
+        else:
+            cleaned.append(p)
+    return cleaned
 
 
 def _ensure_session() -> dict:
@@ -118,13 +163,16 @@ def main():
         pass
 
     print(
-        ">> Commands: :start, :end, :reset, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools\n"
+        ">> Commands: :start, :end, :reset, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools, :help, :hints on|off, :suggest\n"
+        ">> Prefer colon commands. Legacy function calls like spawnNpc('Gruk','goblin') are supported but normalized.\n"
+        ">> Aliases: 'go <dir>', 'move <dir>', 'look' (same as :look).\n"
         ">> Dice: '!roll XdY', '!roll-a dY'. Chat free-form for narrative. 'exit' to quit."
     )
     _print_tools()
     _ensure_session()
     history = []  # keep track of conversation for context
     last_tile: Optional[dict] = None
+    hints_enabled: bool = True
 
     while True:
         text = input("You: ").strip()
@@ -133,6 +181,71 @@ def main():
 
         if text.startswith(":tools"):
             _print_tools()
+            continue
+
+        if text.startswith(":help"):
+            print(
+                "\nCommands:\n"
+                ":start | :end | :reset | :move <north|south|east|west|up|down|forward|back|left|right> | :look | :spawn [name] [kind] | :npc <id> | :journal | :sessions | :use <id> | :tools | :help | :hints on|off | :suggest\n"
+                "Aliases: 'go <dir>', 'move <dir>', 'look'.\n"
+                "Examples: go west | :move forward | :spawn Gruk goblin | !roll d20\n"
+            )
+            continue
+
+        if text.startswith(":hints"):
+            arg = text.split(" ", 1)[1].strip().lower() if " " in text else ""
+            if arg in {"on", "off"}:
+                hints_enabled = arg == "on"
+                print(f"💡 Hints {'enabled' if hints_enabled else 'disabled'}")
+            else:
+                print(f"💡 Hints are {'on' if hints_enabled else 'off'} — use :hints on|off")
+            continue
+
+        if text.startswith(":suggest"):
+            suggestions = _list_suggestions(last_tile)
+            if suggestions:
+                print("👉 Try:", " | ".join(suggestions))
+            continue
+
+        # --- Legacy function-style inputs; normalize to colon commands ---
+        lower = text.lower()
+        if lower.startswith("spawnnpc("):
+            args = _parse_legacy_call_args(text)
+            name = args[0] if len(args) > 0 else None
+            kind = args[1] if len(args) > 1 else None
+            res = spawnNpc(name=name, kind=kind)
+            npc = res["npc"]
+            print(f"⚔️  Spawned {npc['name']} (id={npc['id']}, kind={npc['kind']}, AC={npc['armor_class']})")
+            print(res["message"])
+            if hints_enabled and last_tile:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+            continue
+        if lower.startswith("movedir("):
+            args = _parse_legacy_call_args(text)
+            direction = args[0] if args else ""
+            if direction:
+                payload = moveDir(direction)
+                print(f"🧭 Move: {direction} → event {payload.get('event_id')}")
+                print(_fmt_tile(payload))
+                last_tile = payload
+                _narrate_from_tile(client, payload, event_id=payload.get("event_id"))
+                if hints_enabled:
+                    print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+                continue
+        if lower.startswith("lookaround("):
+            payload = lookAround()
+            print("👀 Look:")
+            print(_fmt_tile(payload))
+            last_tile = payload
+            _narrate_from_tile(client, payload)
+            if hints_enabled:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+            continue
+        if lower.startswith("startsession(") or lower == "startsession":
+            payload = startSession()
+            print(f"✅ Session started: {payload['session_id']}")
+            print(_fmt_tile(payload))
+            last_tile = payload
             continue
 
         if text.startswith(":start"):
@@ -166,6 +279,8 @@ def main():
             print(_fmt_tile(payload))
             last_tile = payload
             _narrate_from_tile(client, payload, event_id=payload.get("event_id"))
+            if hints_enabled:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
             continue
 
         if text.startswith(":look"):
@@ -174,9 +289,11 @@ def main():
             print(_fmt_tile(payload))
             last_tile = payload
             _narrate_from_tile(client, payload)
+            if hints_enabled:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
             continue
 
-        if text.startswith(":spawn"):
+        if text.startswith(":spawn") or text.lower().startswith("spawn "):
             parts = text.split()
             name: Optional[str] = parts[1] if len(parts) > 1 else None
             kind: Optional[str] = parts[2] if len(parts) > 2 else None
@@ -221,20 +338,52 @@ def main():
             continue
 
         if text.startswith("!roll "):
-            notation = text.split(" ", 1)[1]
-            result = roll_dice(notation)
-            print(
-                f"Dice: {result['notation']} → rolls={result['rolls']}, total={result['total']}"
-            )
+            notation = text.split(" ", 1)[1].strip()
+            try:
+                result = roll_dice(notation)
+                print(
+                    f"Dice: {result['notation']} → rolls={result['rolls']}, total={result['total']}"
+                )
+                if hints_enabled and last_tile:
+                    print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+            except Exception as e:
+                print(f"❌ {e}. Try '!roll 1d20' or '!roll 2d6'.")
             continue
 
         if text.startswith("!roll-a "):
-            notation = text.split(" ", 1)[1]
-            adv = roll_with_advantage(notation)
-            msg = f" — {adv['message']}" if adv.get("message") else ""
-            print(
-                f"Advantage: {adv['notation']} → rolls={adv['rolls']}, result={adv['result']}{msg}"
-            )
+            notation = text.split(" ", 1)[1].strip()
+            try:
+                adv = roll_with_advantage(notation)
+                msg = f" — {adv['message']}" if adv.get("message") else ""
+                print(
+                    f"Advantage: {adv['notation']} → rolls={adv['rolls']}, result={adv['result']}{msg}"
+                )
+                if hints_enabled and last_tile:
+                    print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+            except Exception as e:
+                print(f"❌ {e}. Try '!roll-a d20'.")
+            continue
+
+        # Natural language command aliases (no colon)
+        if text.lower().startswith("go ") or text.lower().startswith("move "):
+            direction = text.split(" ", 1)[1].strip()
+            payload = moveDir(direction)
+            print(f"🧭 Move: {direction} → event {payload.get('event_id')}")
+            print(_fmt_tile(payload))
+            last_tile = payload
+            _narrate_from_tile(client, payload, event_id=payload.get("event_id"))
+            if hints_enabled:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
+            continue
+
+        if text.lower() in {"look", "look around"}:
+            payload = lookAround()
+            print("👀 Look:")
+            print(_fmt_tile(payload))
+            last_tile = payload
+            _narrate_from_tile(client, payload)
+            if hints_enabled:
+                print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
             continue
 
         # append to history and send full conversation each time
@@ -271,6 +420,8 @@ def main():
         assistant_msg = response['message']['content']
         print(f"DM: {assistant_msg}")
         history.append({"role":"assistant","content":assistant_msg})
+        if hints_enabled and last_tile:
+            print("👉 Try:", " | ".join(_list_suggestions(last_tile)))
         # Try to log narrative against the last move event if present (best-effort)
         try:
             # We cannot know event_id directly; this is a simple attempt to attach to last journal turn

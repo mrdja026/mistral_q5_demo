@@ -23,27 +23,35 @@ class RollResult(TypedDict):
 
 
 def parse_dice_notation(notation: str) -> tuple[int, int]:
-    """Parse an NdM dice notation string and return (count, sides).
+    """Parse dice notation and return (count, sides).
 
-    Examples: "2d20" -> (2, 20). Raises ValueError for invalid input.
+    Accepts standard NdM (e.g., "2d20") and the common shorthand "d20" which
+    defaults to a single die (1d20). Raises ValueError for invalid input.
     """
     s = notation.lower().strip()
     if "d" not in s:
-        raise ValueError("Use NdM format, e.g., '2d20'")
+        raise ValueError("Use NdM format (e.g., '2d20') or shorthand 'd20'")
     count_str, sides_str = s.split("d", 1)
-    count = int(count_str)
+    if not sides_str.isdigit():
+        raise ValueError("Number of sides must be digits after 'd', e.g., 'd20'")
     sides = int(sides_str)
+    if count_str == "":
+        count = 1  # allow 'd20' shorthand
+    else:
+        if not count_str.isdigit():
+            raise ValueError("Number of dice must be digits before 'd', e.g., '2d6'")
+        count = int(count_str)
     if count <= 0 or sides <= 0:
         raise ValueError("Count and sides must be positive")
     return count, sides
 
 
 def roll_dice(notation: str) -> RollResult:
-    """Roll dice according to NdM notation and return a structured result."""
+    """Roll dice according to NdM or shorthand 'dM' and return a structured result."""
     count, sides = parse_dice_notation(notation)
     rolls = [random.randint(1, sides) for _ in range(count)]
     return {
-        "notation": notation,
+        "notation": f"{count}d{sides}",
         "count": count,
         "sides": sides,
         "rolls": rolls,
