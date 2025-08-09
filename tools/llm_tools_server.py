@@ -4,8 +4,6 @@ MCP stdio server for Cursor — exposes typed tools the model can call in chat/f
 Run with: python -m tools.llm_tools_server
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import logging
@@ -348,7 +346,7 @@ def summarize_file(path: str, max_lines: int = 200) -> str:
     return f"{p} — {len(lines)} total non-empty lines\n" + "\n".join(head)
 
 @mcp.tool()
-def function_skeleton(name: str, docstring: Optional[str] = None) -> str:
+def function_skeleton(name: str, docstring: str = None) -> str:
     """Generate a clean, typed Python function skeleton."""
     logger.debug("function_skeleton(name=%s, has_doc=%s)", name, bool(docstring))
     safe = "".join(ch for ch in name if ch.isidentifier() or ch == "_")
@@ -377,7 +375,7 @@ def roll_with_advantage_tool(notation: str) -> dict:
 
 
 @mcp.tool()
-def start_session(theme: Optional[str] = None, tone: Optional[str] = None, max_narrative_words: int = 500) -> Dict[str, Any]:
+def start_session(theme: str = None, tone: str = None, max_narrative_words: int = 500) -> Dict[str, Any]:
     """Create a new in-memory session and return initial tile info."""
     state = _new_session(theme, tone, max_narrative_words)
     global _ACTIVE_SESSION_ID
@@ -387,7 +385,7 @@ def start_session(theme: Optional[str] = None, tone: Optional[str] = None, max_n
 
 
 @mcp.tool()
-def move(direction: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+def move(direction: str, session_id: str = None) -> Dict[str, Any]:
     """Move in a direction (north/south/east/west/up/down or forward/back/left/right). Returns tile info and an event_id.
 
     If session_id is omitted, uses the current active session.
@@ -425,7 +423,7 @@ def move(direction: str, session_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def look(session_id: Optional[str] = None) -> Dict[str, Any]:
+def look(session_id: str = None) -> Dict[str, Any]:
     """Return current tile info for the session without moving. Uses active session if none provided."""
     sid = session_id or _ACTIVE_SESSION_ID
     if not sid or sid not in _SESSIONS:
@@ -438,7 +436,7 @@ def look(session_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def log_narrative(text: str, event_id: int, session_id: Optional[str] = None) -> Dict[str, Any]:
+def log_narrative(text: str, event_id: int, session_id: str = None) -> Dict[str, Any]:
     """Record the model's narrative for a prior event (e.g., move). Uses active session if none provided."""
     sid = session_id or _ACTIVE_SESSION_ID
     if not sid or sid not in _SESSIONS:
@@ -460,7 +458,7 @@ def log_narrative(text: str, event_id: int, session_id: Optional[str] = None) ->
 
 
 @mcp.tool()
-def journal(session_id: Optional[str] = None) -> Dict[str, Any]:
+def journal(session_id: str = None) -> Dict[str, Any]:
     """Return a concise rolling summary of the session for context refresh. Uses active session if none provided."""
     sid = session_id or _ACTIVE_SESSION_ID
     if not sid or sid not in _SESSIONS:
@@ -474,7 +472,7 @@ def journal(session_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def spawn_npc(name: Optional[str] = None, kind: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+def spawn_npc(name: str = None, kind: str = None, session_id: str = None) -> Dict[str, Any]:
     """Spawn an enemy NPC at the current tile. Returns npc details and a short message.
 
     - Armor class is random between 10 and 15 inclusive.
@@ -518,7 +516,7 @@ def spawn_npc(name: Optional[str] = None, kind: Optional[str] = None, session_id
 
 
 @mcp.tool()
-def get_npc(npc_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+def get_npc(npc_id: str, session_id: str = None) -> Dict[str, Any]:
     """Fetch an NPC by id from session memory."""
     sid = session_id or _ACTIVE_SESSION_ID
     if not sid or sid not in _SESSIONS:
@@ -573,7 +571,7 @@ def list_sessions() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def end_session(session_id: Optional[str] = None) -> Dict[str, Any]:
+def end_session(session_id: str = None) -> Dict[str, Any]:
     """End a session and remove it from memory. If omitted, uses the active session."""
     global _ACTIVE_SESSION_ID
     sid = session_id or _ACTIVE_SESSION_ID
@@ -632,27 +630,27 @@ def tools_help() -> str:
 # ---------- CamelCase alias tools (for nicer UX) ----------
 
 @mcp.tool()
-def startSession(theme: Optional[str] = None, tone: Optional[str] = None, maxNarrativeWords: int = 500) -> Dict[str, Any]:
+def startSession(theme: str = None, tone: str = None, maxNarrativeWords: int = 500) -> Dict[str, Any]:
     return start_session(theme=theme, tone=tone, max_narrative_words=maxNarrativeWords)
 
 
 @mcp.tool()
-def moveDir(direction: str, sessionId: Optional[str] = None) -> Dict[str, Any]:
+def moveDir(direction: str, sessionId: str = None) -> Dict[str, Any]:
     return move(direction=direction, session_id=sessionId)
 
 
 @mcp.tool()
-def lookAround(sessionId: Optional[str] = None) -> Dict[str, Any]:
+def lookAround(sessionId: str = None) -> Dict[str, Any]:
     return look(session_id=sessionId)
 
 
 @mcp.tool()
-def logNarrative(text: str, eventId: int, sessionId: Optional[str] = None) -> Dict[str, Any]:
+def logNarrative(text: str, eventId: int, sessionId: str = None) -> Dict[str, Any]:
     return log_narrative(text=text, event_id=eventId, session_id=sessionId)
 
 
 @mcp.tool()
-def journalSummary(sessionId: Optional[str] = None) -> Dict[str, Any]:
+def journalSummary(sessionId: str = None) -> Dict[str, Any]:
     return journal(session_id=sessionId)
 
 
@@ -672,17 +670,17 @@ def listSessions() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def spawnNpc(name: Optional[str] = None, kind: Optional[str] = None, sessionId: Optional[str] = None) -> Dict[str, Any]:
+def spawnNpc(name: str = None, kind: str = None, sessionId: str = None) -> Dict[str, Any]:
     return spawn_npc(name=name, kind=kind, session_id=sessionId)
 
 
 @mcp.tool()
-def getNpc(npcId: str, sessionId: Optional[str] = None) -> Dict[str, Any]:
+def getNpc(npcId: str, sessionId: str = None) -> Dict[str, Any]:
     return get_npc(npc_id=npcId, session_id=sessionId)
 
 
 @mcp.tool()
-def endSession(sessionId: Optional[str] = None) -> Dict[str, Any]:
+def endSession(sessionId: str = None) -> Dict[str, Any]:
     return end_session(session_id=sessionId)
 
 

@@ -1,6 +1,4 @@
 # chat_with_wrapper.py
-
-from ollama import Client
 from tools.dnd_tools import roll_dice, roll_with_advantage
 from tools.llm_tools_server import (
     startSession,
@@ -19,10 +17,12 @@ from tools.llm_tools_server import (
 )
 
 import json
+import sys
+from importlib import import_module
 from typing import Optional, List
 
 
-def _narrate_from_tile(client: Client, tile_payload: dict, event_id: Optional[int] = None) -> None:
+def _narrate_from_tile(client, tile_payload: dict, event_id: Optional[int] = None) -> None:
     max_words = int(tile_payload.get("max_narrative_words", 500) or 500)
     pos = tile_payload.get("position", {})
     tile = tile_payload.get("tile", {})
@@ -153,8 +153,32 @@ def _ensure_session() -> dict:
     return lookAround()
 
 
-def main():
-    client = Client()
+def _launch_tui() -> None:
+    """Launch the Textual three-pane UI and return when it exits.
+
+    Imports lazily to avoid requiring Textual unless used.
+    """
+    try:
+        GameTUI = getattr(import_module("ui.tui"), "GameTUI")
+    except Exception as e:
+        print("❌ Unable to launch UI. Ensure Textual is installed: pip install textual")
+        print(f"Reason: {e}")
+        return
+    try:
+        GameTUI().run()
+    except Exception as e:
+        print(f"❌ UI error: {e}")
+
+
+def main(argv: list[str] | None = None):
+    # CLI flag to start the TUI directly
+    args = (argv if argv is not None else sys.argv[1:])
+    if any(a in {"--tui", "-u"} for a in args):
+        _launch_tui()
+        return
+    # Defer ollama import so --tui users don't need the dependency
+    import ollama
+    client = ollama.Client()
 
     # Ensure model is ready
     try:
@@ -163,10 +187,11 @@ def main():
         pass
 
     print(
-        ">> Commands: :start, :end, :reset, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools, :help, :hints on|off, :suggest\n"
+        ">> Commands: :start, :end, :reset, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools, :help, :hints on|off, :suggest, :ui\n"
         ">> Prefer colon commands. Legacy function calls like spawnNpc('Gruk','goblin') are supported but normalized.\n"
         ">> Aliases: 'go <dir>', 'move <dir>', 'look' (same as :look).\n"
-        ">> Dice: '!roll XdY', '!roll-a dY'. Chat free-form for narrative. 'exit' to quit."
+        ">> Dice: '!roll XdY', '!roll-a dY'. Chat free-form for narrative. 'exit' to quit.\n"
+        ">> UI: ':ui' to launch the three-pane interface, or run: python -m ui.tui"
     )
     _print_tools()
     _ensure_session()
@@ -186,7 +211,7 @@ def main():
         if text.startswith(":help"):
             print(
                 "\nCommands:\n"
-                ":start | :end | :reset | :move <north|south|east|west|up|down|forward|back|left|right> | :look | :spawn [name] [kind] | :npc <id> | :journal | :sessions | :use <id> | :tools | :help | :hints on|off | :suggest\n"
+                ":start | :end | :reset | :move <north|south|east|west|up|down|forward|back|left|right> | :look | :spawn [name] [kind] | :npc <id> | :journal | :sessions | :use <id> | :tools | :help | :hints on|off | :suggest | :ui\n"
                 "Aliases: 'go <dir>', 'move <dir>', 'look'.\n"
                 "Examples: go west | :move forward | :spawn Gruk goblin | !roll d20\n"
             )
@@ -205,6 +230,10 @@ def main():
             suggestions = _list_suggestions(last_tile)
             if suggestions:
                 print("👉 Try:", " | ".join(suggestions))
+            continue
+
+        if text.startswith(":ui"):
+            _launch_tui()
             continue
 
         # --- Legacy function-style inputs; normalize to colon commands ---
