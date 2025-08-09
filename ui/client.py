@@ -16,6 +16,10 @@ from tools.llm_tools_server import (
     getNpc,
     endSession,
     resetAll,
+    generate_encounter,
+    attack as tool_attack,
+    combat_status,
+    combat_end,
 )
 
 
@@ -57,5 +61,18 @@ class GameClient:
 
     def log(self, text: str, event_id: int) -> Dict[str, Any]:
         return logNarrative(text=text, eventId=event_id)
+
+    # ---- Combat wrappers ----
+    def generate_encounter(self, name: Optional[str] = None, kind: Optional[str] = None) -> Dict[str, Any]:
+        return generate_encounter(name=name, kind=kind)
+
+    def attack(self, weapon: str, damage: str, advantage: bool = False, disadvantage: bool = False) -> Dict[str, Any]:
+        return tool_attack(weapon=weapon, damage=damage, advantage=advantage, disadvantage=disadvantage)
+
+    def combat_status(self) -> Dict[str, Any]:
+        return combat_status()
+
+    def combat_end(self) -> Dict[str, Any]:
+        return combat_end()
 
 

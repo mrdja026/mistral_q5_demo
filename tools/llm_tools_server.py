@@ -17,7 +17,12 @@ import time
 import random
 
 from mcp.server.fastmcp import FastMCP
-from .dnd_tools import roll_dice, roll_with_advantage
+from .dnd_tools import (
+    roll_dice,
+    roll_with_advantage,
+    roll_with_disadvantage,
+    roll_damage,
+)
 
 mcp = FastMCP("llm-tools")  # server name as it will appear in Cursor
 
@@ -64,6 +69,10 @@ _TOOL_NAMES = [
     "health",
     "ping",
     "echo",
+    "generate_encounter",
+    "attack",
+    "combat_status",
+    "combat_end",
 ]
 _TOOL_ALIASES = [
     "startSession",
@@ -79,6 +88,9 @@ _TOOL_ALIASES = [
     "spawnNpc",
     "getNpc",
     "tools_help",
+    "generateEncounter",
+    "combatStatus",
+    "combatEnd",
 ]
 
 # ============================
@@ -298,6 +310,7 @@ def _new_session(theme: Optional[str], tone: Optional[str], max_words: int) -> D
         "events": [],
         "journal": [],
         "npcs": {},  # npc_id -> npc record
+        "combat": None,  # combat state when active
         "settings": {
             "theme": theme or "dungeon",
             "tone": tone or "moody",
@@ -326,6 +339,30 @@ def _public_tile_payload(session: Dict[str, Any]) -> Dict[str, Any]:
         "heading": session["heading"],
         "session_id": session["session_id"],
         "max_narrative_words": session["settings"]["max_narrative_words"],
+        "combat": _public_combat(session.get("combat")),
+    }
+
+
+def _public_combat(combat: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not combat:
+        return None
+    # Return a trimmed/ordered snapshot
+    return {
+        "active": bool(combat.get("active", False)),
+        "enemies": [
+            {
+                "id": e.get("id"),
+                "name": e.get("name"),
+                "kind": e.get("kind"),
+                "armor_class": e.get("armor_class"),
+                "hp": e.get("hp"),
+                "max_hp": e.get("max_hp"),
+                "status": e.get("status", []),
+            }
+            for e in combat.get("enemies", [])
+        ],
+        "round": combat.get("round", 1),
+        "log": combat.get("log", [])[-8:],
     }
 
 
@@ -498,6 +535,8 @@ def spawn_npc(name: str = None, kind: str = None, session_id: str = None) -> Dic
             "name": nm,
             "kind": k,
             "armor_class": armor_class,
+            "max_hp": rng.randint(8, 20),
+            "hp": None,  # set when combat begins
             "position": dict(pos),
             "disposition": "hostile",
         }
@@ -617,11 +656,14 @@ def tools_help() -> str:
         "- roll_dice_tool('2d20'), roll_with_advantage_tool('d20')",
         "Aliases:",
         "- startSession, moveDir, lookAround, logNarrative, journalSummary, getActiveSession, setActiveSession, listSessions, endSession, resetAll, spawnNpc, getNpc",
+        "- generateEncounter, combatStatus, combatEnd",
         "Examples:",
         "- startSession()",
         "- moveDir('north')",
         "- lookAround()",
         "- spawnNpc('Gruk','goblin')",
+        "- generateEncounter()",
+        "- combatEnd()",
         "- logNarrative('Your boots crunch mortar…', 42)",
     ]
     return "\n".join(lines)
@@ -687,6 +729,191 @@ def endSession(sessionId: str = None) -> Dict[str, Any]:
 @mcp.tool()
 def resetAll() -> Dict[str, Any]:
     return reset_all()
+
+
+# ============================
+# Combat helpers and tools
+# ============================
+
+def _ensure_combat(session: Dict[str, Any]) -> Dict[str, Any]:
+    combat = session.get("combat")
+    if not combat:
+        combat = {"active": True, "round": 1, "enemies": [], "log": []}
+        session["combat"] = combat
+    return combat
+
+
+def _fmt_enemy_line(e: Dict[str, Any]) -> str:
+    name = e.get("name") or e.get("kind") or "foe"
+    hp = e.get("hp")
+    max_hp = e.get("max_hp")
+    ac = e.get("armor_class")
+    return f"{name} (AC {ac}) HP {hp}/{max_hp}"
+
+
+def _append_combat_log(session: Dict[str, Any], text: str) -> None:
+    combat = _ensure_combat(session)
+    combat.setdefault("log", []).append(text)
+    if len(combat["log"]) > 200:
+        combat["log"] = combat["log"][-150:]
+
+
+@mcp.tool()
+def generate_encounter(name: str = None, kind: str = None, session_id: str = None) -> Dict[str, Any]:
+    """Create a simple combat encounter at current tile by spawning one enemy and starting combat.
+
+    Reuses spawn_npc for generation and initializes combat state. UI should not call tools directly; this is a convenience tool driven by commands.
+    """
+    sid = session_id or _ACTIVE_SESSION_ID
+    if not sid or sid not in _SESSIONS:
+        raise ValueError("No active session. Call start_session() or pass session_id explicitly.")
+    logger.info("generate_encounter(session_id=%s)", sid)
+    # IMPORTANT: spawn_npc acquires the session lock; do NOT hold it here to avoid deadlock
+    spawn = spawn_npc(name=name, kind=kind, session_id=sid)
+    npc = spawn["npc"]
+    lock = _with_session_lock(sid)
+    with lock:
+        session = _SESSIONS[sid]
+        combat = _ensure_combat(session)
+        # Set HP for the spawned npc if not set
+        hp = npc.get("max_hp") or 12
+        npc["hp"] = npc.get("hp") or hp
+        enemy = {
+            "id": npc["id"],
+            "name": npc.get("name"),
+            "kind": npc.get("kind"),
+            "armor_class": npc.get("armor_class"),
+            "max_hp": npc.get("max_hp") or hp,
+            "hp": npc.get("hp") or hp,
+            "status": [],
+        }
+        # Avoid duplicate enemies if called twice
+        existing_ids = {e.get("id") for e in combat.get("enemies", [])}
+        if enemy["id"] not in existing_ids:
+            combat.setdefault("enemies", []).append(enemy)
+        combat["active"] = True
+        _append_combat_log(session, f"Encounter begins! {_fmt_enemy_line(enemy)}")
+        event_id = _append_event(session, "combat_start", {"enemy": enemy})
+        tile_payload = _public_tile_payload(session)
+        tile_payload["event_id"] = event_id
+        tile_payload["message"] = f"Encounter generated: {enemy.get('name')} (AC {enemy.get('armor_class')})"
+        return tile_payload
+
+
+@mcp.tool()
+def attack(weapon: str = "attack", damage: str = "1d6", advantage: bool = False, disadvantage: bool = False, player_roll: int = None, session_id: str = None) -> Dict[str, Any]:
+    """Resolve a player attack roll against the first enemy. Uses '!roll d20' semantics and damage NdM.
+
+    - advantage/disadvantage optional, not both at once. If both provided, they cancel.
+    - On hit: roll damage; on natural 20: double damage (crit).
+    - Enemy auto-retaliates with a simple attack.
+    Returns structured combat state and a readable summary.
+    """
+    sid = session_id or _ACTIVE_SESSION_ID
+    if not sid or sid not in _SESSIONS:
+        raise ValueError("No active session. Call start_session() or pass session_id explicitly.")
+    lock = _with_session_lock(sid)
+    with lock:
+        session = _SESSIONS[sid]
+        combat = _ensure_combat(session)
+        enemies = [e for e in combat.get("enemies", []) if (e.get("hp", 0) or 0) > 0]
+        if not enemies:
+            raise ValueError("No enemies to attack. Use generate_encounter() or spawn_npc().")
+        foe = enemies[0]
+
+        # Resolve player attack d20
+        d20_result = None
+        d20_rolls = []
+        nat20 = False
+        if isinstance(player_roll, int) and 1 <= player_roll <= 20 and not (advantage or disadvantage):
+            d20_result = int(player_roll)
+            d20_rolls = [player_roll]
+            nat20 = d20_result == 20
+        elif advantage and not disadvantage:
+            adv = roll_with_advantage("d20")
+            d20_result = adv["result"]
+            d20_rolls = adv["rolls"]
+            nat20 = adv["result"] == 20
+        elif disadvantage and not advantage:
+            dis = roll_with_disadvantage("d20")
+            d20_result = dis["result"]
+            d20_rolls = dis["rolls"]
+            nat20 = dis["result"] == 20
+        else:
+            base = roll_dice("1d20")
+            d20_result = base["total"]
+            d20_rolls = base["rolls"]
+            nat20 = d20_result == 20
+
+        hit = d20_result >= int(foe.get("armor_class", 10) or 10)
+
+        summary_lines = []
+        summary_lines.append(f"You attack with {weapon}. d20={d20_result} (rolls={d20_rolls}) vs AC {foe.get('armor_class')}.")
+        player_damage_total = 0
+        if hit:
+            dmg = roll_damage(damage, crit_multiplier=2 if nat20 else 1)
+            player_damage_total = dmg["total"]
+            foe["hp"] = max(0, int(foe.get("hp", 0)) - player_damage_total)
+            crit_txt = " CRITICAL!" if nat20 else ""
+            summary_lines.append(f"Hit! {damage} → {dmg['rolls']} total={dmg['total']}.{crit_txt}")
+            if foe["hp"] == 0:
+                summary_lines.append(f"{foe.get('name') or foe.get('kind')} is defeated!")
+        else:
+            summary_lines.append("Miss!")
+
+        # Simple enemy auto-attack if still alive
+        enemy_damage_total = 0
+        if foe.get("hp", 0) > 0:
+            enemy_d20 = roll_dice("1d20")
+            enemy_hit = enemy_d20["total"] >= 12  # simple target AC for player
+            if enemy_hit:
+                enemy_dmg = roll_damage("1d6")
+                enemy_damage_total = enemy_dmg["total"]
+                summary_lines.append(f"Enemy strikes back! d20={enemy_d20['total']} → damage {enemy_dmg['total']}")
+            else:
+                summary_lines.append(f"Enemy misses (d20={enemy_d20['total']}).")
+
+        # Record combat log and event
+        readable = " ".join(summary_lines)
+        _append_combat_log(session, readable)
+        ev = {
+            "weapon": weapon,
+            "damage_notation": damage,
+            "player_roll": d20_result,
+            "player_damage": player_damage_total,
+            "enemy_damage": enemy_damage_total,
+            "enemy": {"id": foe.get("id"), "hp": foe.get("hp"), "ac": foe.get("armor_class")},
+        }
+        event_id = _append_event(session, "attack", ev)
+        payload = _public_tile_payload(session)
+        payload["event_id"] = event_id
+        payload["combat"] = _public_combat(session.get("combat"))
+        payload["message"] = readable
+        return payload
+
+
+@mcp.tool()
+def combat_status(session_id: str = None) -> Dict[str, Any]:
+    """Return current combat state summary."""
+    sid = session_id or _ACTIVE_SESSION_ID
+    if not sid or sid not in _SESSIONS:
+        raise ValueError("No active session. Call start_session() or pass session_id explicitly.")
+    session = _SESSIONS[sid]
+    return {"combat": _public_combat(session.get("combat"))}
+
+
+@mcp.tool()
+def combat_end(session_id: str = None) -> Dict[str, Any]:
+    """End combat and clear state from session."""
+    sid = session_id or _ACTIVE_SESSION_ID
+    if not sid or sid not in _SESSIONS:
+        raise ValueError("No active session. Call start_session() or pass session_id explicitly.")
+    lock = _with_session_lock(sid)
+    with lock:
+        session = _SESSIONS[sid]
+        session["combat"] = None
+        event_id = _append_event(session, "combat_end", {})
+        return {"ok": True, "event_id": event_id, "message": "The battle is finished."}
 
 
 @mcp.tool()

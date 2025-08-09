@@ -85,6 +85,7 @@ class GameTUI(App):
         self.router.register(CommandSpec("reset", "Reset all sessions", self._cmd_reset, None))
         self.router.register(CommandSpec("move", "Move in a direction", self._cmd_move, "E/W/N/S"))
         self.router.register(CommandSpec("look", "Look around", self._cmd_look, "L"))
+        self.router.register(CommandSpec("roll", "roll NdM or dM", self._cmd_roll, None))
         self.router.register(CommandSpec("spawn", "Spawn an NPC", self._cmd_spawn, None))
         self.router.register(CommandSpec("npc", "Show NPC by id", self._cmd_npc, None))
         self.router.register(CommandSpec("journal", "Show journal", self._cmd_journal, None))
@@ -92,6 +93,10 @@ class GameTUI(App):
         self.router.register(CommandSpec("use", "Switch active session", self._cmd_use, None))
         self.router.register(CommandSpec("llm", "LLM mode on|off", self._cmd_llm, None))
         self.router.register(CommandSpec("raw", "Raw JSON on|off", self._cmd_raw, None))
+        # Combat commands
+        self.router.register(CommandSpec("generate", "generate encounter", self._cmd_generate, None))
+        self.router.register(CommandSpec("attack", "attack \"weapon\" \"NdM\" [adv|dis]", self._cmd_attack, None))
+        self.router.register(CommandSpec("combat", "combat status|end", self._cmd_combat, None))
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -398,6 +403,12 @@ class GameTUI(App):
         items = tile.get("items", [])
         ctx_lines = ["[b]Context[/]"]
         ctx_lines.append("[b]Tile[/]: " + tile.get("biome", "?") + ", " + tile.get("lighting", "?"))
+        # Combat status summary if available
+        combat = self.last_tile.get("combat") if isinstance(self.last_tile, dict) else None
+        if combat and combat.get("active"):
+            ctx_lines.append("[b]Combat[/]: Round " + str(combat.get("round", 1)))
+            for e in combat.get("enemies", [])[:4]:
+                ctx_lines.append(f" - {e.get('name', e.get('kind'))} HP {e.get('hp')}/{e.get('max_hp')} AC {e.get('armor_class')}")
         if ents:
             ctx_lines.append("[b]NPCs[/]:" )
             for e in ents[:5]:
@@ -524,6 +535,124 @@ class GameTUI(App):
         except Exception:
             # If look fails, still update context pane
             self._render_context()
+
+    def _cmd_roll(self, arg: str) -> None:
+        val = (arg or "").strip()
+        if not val:
+            self._error("Usage: :roll NdM or dM")
+            return
+        try:
+            from tools.dnd_tools import roll_dice
+            res = roll_dice(val)
+            self._info(f"Dice {res['notation']}: rolls={res['rolls']} total={res['total']}")
+        except Exception as e:
+            self._error(str(e))
+
+    def _cmd_generate(self, arg: str) -> None:
+        # Accept: :generate encounter [name] [kind]
+        parts = (arg or "").split()
+        if len(parts) == 0 or parts[0] not in {"encounter", "encouter"}:
+            self._error("Usage: :generate encounter [name] [kind]")
+            return
+        name = parts[1] if len(parts) > 1 else None
+        kind = parts[2] if len(parts) > 2 else None
+        try:
+            payload = self.client.generate_encounter(name=name, kind=kind) if (name or kind) else self.client.generate_encounter()
+        except Exception as e:
+            self._error(str(e))
+            return
+        self.last_tile = payload
+        self._info(payload.get("message", "Encounter generated"))
+        self._print_tile(payload)
+        if self.raw_enabled:
+            self._json_block("Raw payload", payload)
+        self._render_context()
+        if self.llm_enabled:
+            self._narrate_from_tile_async(payload, payload.get("event_id"))
+
+    def _cmd_attack(self, arg: str) -> None:
+        # Expect: "weapon" "NdM" [adv|dis]
+        weapon = "attack"
+        dmg = "1d6"
+        adv = False
+        dis = False
+        s = arg.strip()
+        try:
+            if s.startswith('"'):
+                idx = s.find('"', 1)
+                weapon = s[1:idx]
+                s = s[idx+1:].strip()
+            parts = s.split()
+            if parts:
+                if parts[0].startswith('"'):
+                    idx = s.find('"', 1)
+                    dmg = s[1:idx]
+                    rest = s[idx+1:].strip()
+                else:
+                    dmg = parts[0]
+                    rest = " ".join(parts[1:]) if len(parts) > 1 else ""
+                flag = (rest or "").lower()
+                if flag in {"adv", "advantage"}: adv = True
+                if flag in {"dis", "disadvantage"}: dis = True
+        except Exception:
+            pass
+        try:
+            payload = self.client.attack(weapon, dmg, advantage=adv, disadvantage=dis)
+            msg = payload.get("message", "")
+            # Status line summary
+            self._info("Attack resolved")
+            # Center transcript readable block
+            self.transcript.write("")
+            self.transcript.write("[b]🗡️  Attack[/]")
+            if msg:
+                for line in msg.splitlines():
+                    self.transcript.write(line)
+            # Print enemy HP summary if present
+            combat = payload.get("combat") if isinstance(payload, dict) else None
+            if combat and combat.get("enemies"):
+                self.transcript.write("Enemies:")
+                for e in combat.get("enemies", [])[:4]:
+                    self.transcript.write(
+                        f" - {e.get('name', e.get('kind'))} HP {e.get('hp')}/{e.get('max_hp')} AC {e.get('armor_class')}"
+                    )
+            self.transcript.write("")
+            self.last_tile = payload
+            if self.raw_enabled:
+                self._json_block("Raw payload", payload)
+            self._render_context()
+        except Exception as e:
+            self._error(str(e))
+            # Also echo to transcript for visibility
+            self.transcript.write("")
+            self.transcript.write("[b]🗡️  Attack[/]")
+            self.transcript.write(f"❌ {e}")
+            self.transcript.write("")
+
+    def _cmd_combat(self, arg: str) -> None:
+        a = (arg or "").strip().lower()
+        if a == "status":
+            res = self.client.combat_status()
+            self._info("Combat status")
+            self._json_block("Combat", res)
+            try:
+                # Keep context pane in sync without losing other last_tile fields
+                if isinstance(self.last_tile, dict):
+                    self.last_tile["combat"] = res.get("combat")
+                    self._render_context()
+            except Exception:
+                pass
+            return
+        if a == "end":
+            res = self.client.combat_end()
+            self._info(res.get("message", "The battle is finished."))
+            try:
+                if isinstance(self.last_tile, dict):
+                    self.last_tile["combat"] = None
+                    self._render_context()
+            except Exception:
+                pass
+            return
+        self._error("Usage: :combat status | :combat end")
 
     def _cmd_npc(self, arg: str) -> None:
         npc_id = arg.strip()

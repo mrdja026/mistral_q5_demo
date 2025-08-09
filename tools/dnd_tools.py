@@ -124,10 +124,95 @@ def roll_with_advantage(notation: str) -> AdvantageRollResult:
     }
 
 
+class DisadvantageRollResult(TypedDict):
+    """Structured result for a single-die roll with disadvantage using dM notation.
+
+    Keys mirror AdvantageRollResult but the selected result is the lower of the two.
+    """
+
+    notation: str
+    sides: int
+    rolls: list[int]
+    result: int
+    is_critical_success: bool
+    is_critical_fail: bool
+    message: str
+
+
+def roll_with_disadvantage(notation: str) -> DisadvantageRollResult:
+    """Roll a single die with disadvantage using dM notation (e.g., 'd20')."""
+    s = notation.lower().strip()
+    if not s or "d" not in s:
+        raise ValueError("Use dM format, e.g., 'd20'")
+
+    if s.startswith("d"):
+        sides_str = s[1:]
+        if not sides_str.isdigit():
+            raise ValueError("Use dM format with digits after 'd', e.g., 'd20'")
+        sides = int(sides_str)
+    else:
+        count, sides = parse_dice_notation(s)
+        if count != 1:
+            raise ValueError("Disadvantage uses a single die: use 'd20', not '2d20'")
+
+    if sides <= 0:
+        raise ValueError("Sides must be positive")
+
+    first = random.randint(1, sides)
+    second = random.randint(1, sides)
+    result = min(first, second)
+
+    is_crit_success = sides == 20 and result == 20
+    is_crit_fail = sides == 20 and result == 1
+    message = "Critical success" if is_crit_success else ("Critical fail" if is_crit_fail else "")
+
+    return {
+        "notation": f"d{sides}",
+        "sides": sides,
+        "rolls": [first, second],
+        "result": result,
+        "is_critical_success": is_crit_success,
+        "is_critical_fail": is_crit_fail,
+        "message": message,
+    }
+
+
+class DamageRollResult(TypedDict):
+    """Structured result for a damage roll.
+
+    Keys:
+    - notation: NdM provided
+    - rolls: individual die results
+    - total: sum of rolls (after crit multiplier if applied by caller)
+    - crit_multiplier: multiplier applied to base roll total (1 or 2 typically)
+    """
+
+    notation: str
+    rolls: list[int]
+    total: int
+    crit_multiplier: int
+
+
+def roll_damage(notation: str, crit_multiplier: int = 1) -> DamageRollResult:
+    """Roll damage using NdM notation. Caller decides crit multiplier (1=normal, 2=crit)."""
+    base = roll_dice(notation)
+    total = int(base["total"]) * int(max(1, crit_multiplier))
+    return {
+        "notation": base["notation"],
+        "rolls": base["rolls"],
+        "total": total,
+        "crit_multiplier": int(max(1, crit_multiplier)),
+    }
+
+
 __all__ = [
     "RollResult",
     "AdvantageRollResult",
+    "DisadvantageRollResult",
+    "DamageRollResult",
     "parse_dice_notation",
     "roll_dice",
     "roll_with_advantage",
+    "roll_with_disadvantage",
+    "roll_damage",
 ]
