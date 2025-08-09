@@ -5,6 +5,59 @@ mistra-instruct-dnd
 
 You can use the commands listed bellow to create a dnd campaing
 
+
+# trying to make to work with moe model that runs on ollama 
+- lots of dependency issues, frequent changes in the llama.cpp break stuff often which requires community to fix it and then publish the new model
+- examples
+  - https://github.com/ggml-org/llama.cpp/issues/10244
+  - https://huggingface.co/TheBloke/dolphin-2.7-mixtral-8x7b-GGUF/discussions/4
+
+Sometimes building with ollama can say that everything is successfull but the model is syntatcly correct but for examples points to weights/vector  that are changed
+- my interperation. 
+So to mitigate that its preferable to use linux/wsl
+- create venv recomended
+- find the requrements txt
+- install requirements 
+- sudo apt update
+- sudo apt install build-essential cmake git git-lfs -y
+- clone newest version of llama
+- build it - steps ab
+```bash
+   # Navigate to your project folder
+  cd ~ 
+  # Activate the venv
+  source gguf_forge_linux/bin/activate
+  ```
+
+```bash
+  # Navigate to the llama.cpp directory
+  cd llama.cpp
+
+  # Clean any old attempts
+  rm -rf build
+  mkdir build
+  cd build
+
+  # Configure and build
+  cmake .. -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+  cmake --build . --config Release
+  ``` 
+
+- note curl=off is optional some architecture issue (afaik) for my system
+
+```bash
+  ./build/bin/llama-cli -m ./models/mixtral-8x7b-instruct-v0.1.Q5_K_M.gguf \
+--color \
+-c 4096 \
+-n 256 \
+-i \
+--system-prompt "You are a creative and helpful Dungeons & Dragons narrator and game master. You have access to a set of tools. You use humor where appropriate, and when writing you are clear, concise, and terse. Your stories should not be more than 300 characters."
+```
+From llama.cpp 
+
+- note: cuda and curl parameter can be different based on env 
+
+
 - Requirements:
 - Download the model in question or other
 - Create a modelfile or use the existing one
@@ -53,7 +106,8 @@ CLI mode
   - `!roll NdM` and `!roll-a dM` (advantage) also supported
 - Free chat: any text without a leading `:`/`!` sends to the LLM for narrative. 
 
-TUI mode (Textual)
+
+TUI mode (Textual) 
 ------------------
 - Run: `python -m ui.tui` (or from CLI type `:ui`)
 - Left: actions list; Center: transcript; Right: context (tile, NPCs, items, combat).
