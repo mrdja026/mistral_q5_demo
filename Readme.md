@@ -5,6 +5,7 @@ mistra-instruct-dnd
 
 You can use the commands listed bellow to create a dnd campaing
 
+
 # trying to make to work with moe model that runs on ollama 
 - lots of dependency issues, frequent changes in the llama.cpp break stuff often which requires community to fix it and then publish the new model
 - examples
@@ -56,6 +57,7 @@ From llama.cpp
 
 - note: cuda and curl parameter can be different based on env 
 
+
 - Requirements:
 - Download the model in question or other
 - Create a modelfile or use the existing one
@@ -103,6 +105,7 @@ CLI mode
   - `:roll NdM` (e.g., `:roll 2d6`)
   - `!roll NdM` and `!roll-a dM` (advantage) also supported
 - Free chat: any text without a leading `:`/`!` sends to the LLM for narrative. 
+
 
 TUI mode (Textual) 
 ------------------
