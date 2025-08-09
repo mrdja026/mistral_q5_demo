@@ -14,10 +14,77 @@ from tools.llm_tools_server import (
     spawnNpc,
     getNpc,
     tools_help,
+    endSession,
+    resetAll,
 )
 
 import json
 from typing import Optional
+
+
+def _narrate_from_tile(client: Client, tile_payload: dict, event_id: Optional[int] = None) -> None:
+    max_words = int(tile_payload.get("max_narrative_words", 500) or 500)
+    pos = tile_payload.get("position", {})
+    tile = tile_payload.get("tile", {})
+    facts = tile_payload.get("salient_facts", [])
+    exits = ", ".join(tile.get("exits", tile_payload.get("exits", [])))
+    entities = ", ".join([e.get("kind", e.get("name", "")) for e in tile.get("entities", [])])
+    items = ", ".join([i.get("kind", "") for i in tile.get("items", [])])
+    hazards = ", ".join(tile.get("hazards", []))
+
+    brief = [
+        f"Exits: {exits}" if exits else "",
+        f"Entities: {entities}" if entities else "",
+        f"Items: {items}" if items else "",
+        f"Hazards: {hazards}" if hazards else "",
+    ]
+    brief = "; ".join([b for b in brief if b])
+
+    # Build mandatory points of interest the narrative MUST include
+    points_of_interest = []
+    for f in facts or []:
+        points_of_interest.append(f)
+    if items:
+        points_of_interest.append(f"Notable items present: {items}")
+    if entities:
+        points_of_interest.append(f"Entities present: {entities}")
+    if hazards:
+        points_of_interest.append(f"Hazards: {hazards}")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You are a Dungeon Master. In up to {max_words} words, vividly describe what the player perceives at position {pos}. "
+                "The narrative MUST include all Points of Interest listed by the user as explicit details (weave them naturally but do not omit). "
+                "Do not invent exits, items, entities, or hazards beyond what is provided."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Environment summary: " + (brief if brief else "(none)") +
+                "\nPoints of Interest (must include all):\n - " + "\n - ".join(points_of_interest or [])
+            ),
+        },
+    ]
+
+    predict_tokens = int(max(256, min(3072, max_words * 2)))
+    resp = client.chat(
+        model="dnd-writer",
+        messages=messages,
+        options={
+            "num_predict": predict_tokens,
+            "temperature": 0.8,
+        },
+    )
+    text = resp["message"]["content"]
+    print(f"DM: {text}")
+    if event_id is not None:
+        try:
+            logNarrative(text=text, eventId=event_id)
+        except Exception:
+            pass
 
 def _print_tools() -> None:
     print("\n⚙️  Tools available:\n")
@@ -51,12 +118,13 @@ def main():
         pass
 
     print(
-        ">> Commands: :start, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools\n"
+        ">> Commands: :start, :end, :reset, :move <dir>, :look, :spawn [name] [kind], :npc <id>, :journal, :sessions, :use <id>, :tools\n"
         ">> Dice: '!roll XdY', '!roll-a dY'. Chat free-form for narrative. 'exit' to quit."
     )
     _print_tools()
     _ensure_session()
     history = []  # keep track of conversation for context
+    last_tile: Optional[dict] = None
 
     while True:
         text = input("You: ").strip()
@@ -71,6 +139,24 @@ def main():
             payload = startSession()
             print(f"✅ Session started: {payload['session_id']}")
             print(_fmt_tile(payload))
+            last_tile = payload
+            continue
+
+        if text.startswith(":end"):
+            active = getActiveSession()
+            sid = active.get("session_id")
+            if not sid:
+                print("ℹ️  No active session")
+            else:
+                res = endSession(sid)
+                print(f"🛑 Ended session: {res.get('ended')}")
+            last_tile = None
+            continue
+
+        if text.startswith(":reset"):
+            resetAll()
+            print("🧹 Reset all sessions")
+            last_tile = None
             continue
 
         if text.startswith(":move "):
@@ -78,12 +164,16 @@ def main():
             payload = moveDir(direction)
             print(f"🧭 Move: {direction} → event {payload.get('event_id')}")
             print(_fmt_tile(payload))
+            last_tile = payload
+            _narrate_from_tile(client, payload, event_id=payload.get("event_id"))
             continue
 
         if text.startswith(":look"):
             payload = lookAround()
             print("👀 Look:")
             print(_fmt_tile(payload))
+            last_tile = payload
+            _narrate_from_tile(client, payload)
             continue
 
         if text.startswith(":spawn"):
@@ -149,22 +239,35 @@ def main():
 
         # append to history and send full conversation each time
         history.append({"role":"user","content":text})
-        # Insert system prompt at first message
-        # Include a grounding hint: model should stay consistent with the latest tile facts
-        latest = lookAround()
-        grounding = (
-            "Narrate vividly but stay consistent with tool facts. Current tile exits: "
-            + ", ".join(latest.get("exits", []))
-            + ". Salient facts: "
-            + "; ".join(latest.get("salient_facts", [])[:3])
-            + "."
-        )
+        # Insert system prompts; ground only if we have a cached tile from explicit tool calls
+        grounding = ""
+        if last_tile:
+            grounding = (
+                "Narrate vividly but stay consistent with tool facts. Current tile exits: "
+                + ", ".join(last_tile.get("exits", []))
+                + ". Salient facts: "
+                + "; ".join(last_tile.get("salient_facts", [])[:3])
+                + "."
+            )
+        max_words = 500
+        if last_tile and isinstance(last_tile.get("max_narrative_words"), int):
+            max_words = int(last_tile["max_narrative_words"]) or 500
         messages = [{"role":"system",
-                     "content":"You are a fantasy creative writer DM. Keep responses under 90 words and ground answers in provided tool facts when available."},
-                    {"role":"system", "content": grounding}]
+                     "content":f"You are a fantasy creative writer DM. Keep responses under {max_words} words and ground answers in provided tool facts when available."}]
+        if grounding:
+            messages.append({"role":"system", "content": grounding})
         messages.extend(history)
 
-        response = client.chat(model="dnd-writer", messages=messages)
+        # Allow longer completions by raising token limit
+        predict_tokens = int((max_words if 'max_words' in locals() else 500) * 1.6)
+        response = client.chat(
+            model="dnd-writer",
+            messages=messages,
+            options={
+                "num_predict": max(256, min(2048, predict_tokens)),
+                "temperature": 0.8,
+            },
+        )
         assistant_msg = response['message']['content']
         print(f"DM: {assistant_msg}")
         history.append({"role":"assistant","content":assistant_msg})

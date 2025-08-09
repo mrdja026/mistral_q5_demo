@@ -59,6 +59,8 @@ _TOOL_NAMES = [
     "get_active_session",
     "set_active_session",
     "list_sessions",
+    "end_session",
+    "reset_all",
     "spawn_npc",
     "get_npc",
     "health",
@@ -74,6 +76,8 @@ _TOOL_ALIASES = [
     "getActiveSession",
     "setActiveSession",
     "listSessions",
+    "endSession",
+    "resetAll",
     "spawnNpc",
     "getNpc",
     "tools_help",
@@ -299,7 +303,7 @@ def _new_session(theme: Optional[str], tone: Optional[str], max_words: int) -> D
         "settings": {
             "theme": theme or "dungeon",
             "tone": tone or "moody",
-            "max_narrative_words": int(max_words) if max_words else 80,
+            "max_narrative_words": int(max_words) if max_words else 500,
         },
     }
     # Ensure starting tile exists
@@ -373,7 +377,7 @@ def roll_with_advantage_tool(notation: str) -> dict:
 
 
 @mcp.tool()
-def start_session(theme: Optional[str] = None, tone: Optional[str] = None, max_narrative_words: int = 80) -> Dict[str, Any]:
+def start_session(theme: Optional[str] = None, tone: Optional[str] = None, max_narrative_words: int = 500) -> Dict[str, Any]:
     """Create a new in-memory session and return initial tile info."""
     state = _new_session(theme, tone, max_narrative_words)
     global _ACTIVE_SESSION_ID
@@ -569,6 +573,37 @@ def list_sessions() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def end_session(session_id: Optional[str] = None) -> Dict[str, Any]:
+    """End a session and remove it from memory. If omitted, uses the active session."""
+    global _ACTIVE_SESSION_ID
+    sid = session_id or _ACTIVE_SESSION_ID
+    if not sid:
+        raise ValueError("No session_id provided and no active session")
+    if sid not in _SESSIONS:
+        raise ValueError("Unknown session_id")
+    # Acquire and remove lock then delete state
+    lock = _SESSION_LOCKS.setdefault(sid, threading.Lock())
+    with lock:
+        logger.info("end_session -> %s", sid)
+        _SESSIONS.pop(sid, None)
+        _SESSION_LOCKS.pop(sid, None)
+    if _ACTIVE_SESSION_ID == sid:
+        _ACTIVE_SESSION_ID = None
+    return {"ok": True, "ended": sid}
+
+
+@mcp.tool()
+def reset_all() -> Dict[str, Any]:
+    """Clear all sessions and reset active session id."""
+    logger.info("reset_all()")
+    _SESSIONS.clear()
+    _SESSION_LOCKS.clear()
+    global _ACTIVE_SESSION_ID
+    _ACTIVE_SESSION_ID = None
+    return {"ok": True}
+
+
+@mcp.tool()
 def tools_help() -> str:
     """Human-friendly list of available tools and aliases with examples."""
     lines = [
@@ -580,10 +615,10 @@ def tools_help() -> str:
         "- journal(session_id?) → {turn, summary[]}",
         "- spawn_npc(name?, kind?, session_id?) → {npc, message}",
         "- get_npc(npc_id, session_id?) → {npc}",
-        "- get_active_session() / set_active_session(id) / list_sessions()",
+        "- get_active_session() / set_active_session(id) / list_sessions() / end_session(id?) / reset_all()",
         "- roll_dice_tool('2d20'), roll_with_advantage_tool('d20')",
         "Aliases:",
-        "- startSession, moveDir, lookAround, logNarrative, journalSummary, getActiveSession, setActiveSession, listSessions, spawnNpc, getNpc",
+        "- startSession, moveDir, lookAround, logNarrative, journalSummary, getActiveSession, setActiveSession, listSessions, endSession, resetAll, spawnNpc, getNpc",
         "Examples:",
         "- startSession()",
         "- moveDir('north')",
@@ -597,7 +632,7 @@ def tools_help() -> str:
 # ---------- CamelCase alias tools (for nicer UX) ----------
 
 @mcp.tool()
-def startSession(theme: Optional[str] = None, tone: Optional[str] = None, maxNarrativeWords: int = 80) -> Dict[str, Any]:
+def startSession(theme: Optional[str] = None, tone: Optional[str] = None, maxNarrativeWords: int = 500) -> Dict[str, Any]:
     return start_session(theme=theme, tone=tone, max_narrative_words=maxNarrativeWords)
 
 
@@ -644,6 +679,16 @@ def spawnNpc(name: Optional[str] = None, kind: Optional[str] = None, sessionId: 
 @mcp.tool()
 def getNpc(npcId: str, sessionId: Optional[str] = None) -> Dict[str, Any]:
     return get_npc(npc_id=npcId, session_id=sessionId)
+
+
+@mcp.tool()
+def endSession(sessionId: Optional[str] = None) -> Dict[str, Any]:
+    return end_session(session_id=sessionId)
+
+
+@mcp.tool()
+def resetAll() -> Dict[str, Any]:
+    return reset_all()
 
 
 @mcp.tool()
